@@ -1,0 +1,1413 @@
+---
+title: "Data Science II - Assignment"
+output: html_document
+author: "Rianne Nienke Visscher"
+editor_options: 
+  chunk_output_type: console
+embed-resources: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(tidyverse)
+library(DataExplorer)
+library(patchwork)
+library(glmnet)
+library(broom)
+library(caret)
+library(MASS)
+library(Matrix)
+library(AER) 
+library(e1071)
+library(pscl)
+library(glmmTMB)
+library(performance)
+library(pROC)
+library(reshape2)
+library(nnet)
+library(stargazer)
+
+```
+
+## Problem description
+
+In our cities, there are some services that are essential for our daily living: pharmacies, schools or transport points of sale. However, these facilities are not necessarily well distributed. We want to analyze in this assignment which areas lacks of these facilities based on regression models. The steps to perform the analysis are:
+
+-   Do a descriptive analysis of data
+
+-   Are there variables we can discard, feature selection?
+
+-   Perform a feature engineering process extending important variables.
+
+-   Perform regression modelling for the three target variables (three different models)
+
+-   Create a score to measure which areas have enough facilities and which ones don't.
+
+-   What variables are the most highly related to the score? In particular, what makes a census section to have a low number of facilities?
+
+-   Visualize and discuss the results
+
+## Data set description
+
+For every census section we have a row in our dataset, here are some of the main columns of the dataset: \* census_section_code: census_section_code identifier \* n_pharmacies (target variable 1): number of pharmacies in the census section \* n_schools (target variable 2): number of schools in the census section \* n_transport_salespoints: number of transport points of sale.
+
+```{r}
+df<-fread("census_section_stats.csv", sep=";", dec=",", stringsAsFactors = F)
+```
+
+## Descriptive analysis
+
+In this section, descriptive analysis will be performed to get an idea of how the data is structures and its tendencies. First, a visual inspection of the data is done using histograms and box plots. Then, the correlation among the dependent variables and the independent variables as well as the correlations of the independent variables among themselves will be checked. At last, analysis of multicolinearity is performed.
+
+### Dependent variables
+
+#### Visual inspection of the data
+
+##### Dependent variables
+
+The histograms show that all three independent variables have a large number of zeros compared to the rest of the data and the range of the integer values are rather limited. The histograms clearly show that the variables are not distributed normally and are heavily skewed to the right.
+
+```{r}
+
+p1<-ggplot(df, aes(n_pharmacies))+
+  geom_bar()+
+  labs(x = "Number of pharmacies")
+
+p2<-ggplot(df, aes(n_schools))+
+  geom_bar()+
+  labs(x="Number of schools")
+
+p3<-ggplot(df, aes(n_transport_salespoints))+
+  geom_bar()+
+  labs(x= "Number of transport sales points")
+
+p1+p2+p3
+```
+
+The small range of values is also visible in the box plots below as the interquartile ranges are extremely close to the median. Also, the box plots show that there are some outliers which are close to the maximum values of the boxplot.
+
+```{r}
+p4<- ggplot(df, aes(n_pharmacies))+
+geom_boxplot()+
+  labs(x = "Number of pharmacies")
+
+p5<- ggplot(df, aes(n_schools))+
+geom_boxplot()+
+  labs(x="Number of schools")
+
+p6<- ggplot(df, aes(n_transport_salespoints))+
+geom_boxplot()+
+  labs(x= "Number of transport sales points")
+
+p4+p5+p6
+```
+
+##### Independent variables
+
+These histograms of the main independent variables show that most of these variables are not normally distributed and are often skewed. Only the variable avg_age seems to be normally distributed. The 'percentage number of transactions in the city' and 'city population' seem to have low variance and will therefore most likely not contribute significantly to the model.
+
+```{r, results='hide'}
+p8<-ggplot(df, aes(population))+
+geom_histogram()
+p9<-ggplot(df, aes(family_income))+
+geom_histogram()
+p10<-ggplot(df, aes(income_per_capita))+
+geom_histogram()
+p11<-ggplot(df, aes(avg_age))+
+geom_histogram()
+p12<-ggplot(df, aes(spanish))+
+geom_histogram()
+p13<-ggplot(df, aes(foreigners))+
+geom_histogram()
+p14<-ggplot(df, aes(ratio_expense_home))+
+geom_histogram()
+p15<-ggplot(df, aes(pcg_num_transaction_city))+
+geom_histogram()
+p16<-ggplot(df, aes(city_population))+
+geom_histogram()
+p17<-ggplot(df, aes(population_density))+
+geom_histogram()
+
+```
+
+```{r, message=FALSE}
+p8+p9+p10+p11+p12+p13+p14+p15+p16+p17
+```
+
+#### Correlations
+
+In this section, first the variables that do not hold explanatory variance and are therefore useless for doing regression analysis are deleted. The correlations are presented in a correlation heatmap which shows that there are rather high correlations among some of the independent variables or in other words, the data set contains multicolinearity among independent variables. As these variables contain highly overlapping information, they will together not contribute to the regression models and therefore, one of the two variables will be deleted.
+
+```{r, fig.width=12, fig.height=10}
+df_1 <- dplyr::select_if(df, is.numeric)
+
+df_1<- df_1 |> 
+dplyr::select(-census_section_code, -census_district_code, -city_code, -index, -province_code)
+
+cor_matrix <- cor(df_1)
+
+# Melt the correlation matrix for ggplot
+melted_cor_matrix <- melt(cor_matrix)
+
+# Create a heatmap
+ggplot(melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limit = c(-1,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlation Heatmap")
+
+
+```
+
+#### Checking for multicolinearity
+
+As the correlation heatmap indicates that the data set contains variables that are multicolinear, the extent of this multicolinearity is checked using eigenvalues and the condition number. The eigenvalues of a large portion of the data set are rather low and indicate that indeed some of the variabels are highly correlated. Also, the condition number is large again indicating multicolinearity.
+
+```{r}
+eigenvalues <-eigen(cor_matrix)$values
+eigenvalues_rounded <-round(eigen(cor_matrix)$values,4)
+
+eigen_df <- data.frame(
+  Variable = colnames(cor_matrix),
+  Eigenvalue = eigenvalues_rounded
+)
+eigen_df
+
+condition_number <- sqrt(max(eigenvalues) / min(eigenvalues))
+condition_number 
+```
+
+##### Reducing multicolinearity
+
+Based on the correlation matrix and the eigenvalues, variables are taken out of the data set which reduced the condition number considerably. However, one should note that the new condition number still indicates multicolinearity.
+
+```{r}
+
+df_2 <- df_1 |> 
+  dplyr::select(-"germans":-"romanian") |> 
+   dplyr::select(-"russian":-"dominican") |> 
+  dplyr::select(-"pcg_age_25_39":-"pcg_age_70_y_mas") |> 
+  dplyr::select(-"pcg_foreigners") |> 
+  dplyr::select(-"family_income")
+
+#Checking correlations
+cor_matrix_2 <- cor(df_2)
+
+# Melt the correlation matrix for ggplot
+melted_cor_matrix_2 <- melt(cor_matrix_2)
+
+# Create a heatmap
+ggplot(melted_cor_matrix_2, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limit = c(-1,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlation Heatmap")
+
+eigenvalues_2 <- eigen(cor_matrix_2)$values
+eigenvalues_rounded_2 <-round(eigen(cor_matrix_2)$values,4)
+
+eigen_df_2 <- data.frame(
+  Variable = colnames(cor_matrix_2),
+  Eigenvalue = eigenvalues_rounded_2
+)
+eigen_df_2
+condition_number_2 <- sqrt(max(eigenvalues_2) / min(eigenvalues_2))
+condition_df <- data.frame(condition_number_full = condition_number,
+                            condition_number_reduced = condition_number_2,
+                           difference = condition_number - condition_number_2)
+condition_df
+```
+
+### Feature engineering
+
+In this section, all variables in the data set undergo feature engineering and are squared and cubed. Three different data sets are generated per outcome variable, excluding the feature engineered variables of that specific outcome variable.
+
+```{r}
+
+df_feature<- df_2 |> 
+  mutate(population2 = population^2,
+         population3 = population^3,
+         income_per_capita_2 = income_per_capita^2,
+         income_per_capita_3 = income_per_capita^3,
+         avg_age_2 = avg_age^2,
+         avg_age_3 = avg_age^3,
+         spanish_2 = spanish^2,
+         spanish_3 = spanish^3,
+         foreigners_2 = foreigners^2,
+         foreigners_3 = foreigners^3,
+         europeans2 = europeans^2,
+         europeans3 = europeans^3,
+         non_european2 = non_european^2,
+         non_european3 = non_european^3,
+         pcg_expense_home_2 = pcg_expense_home^2,
+         pcg_expense_home_3 = pcg_expense_home^3,
+         pcg_num_transaction_city_2 = pcg_num_transaction_city^2,
+         pcg_num_transaction_city_3 = pcg_num_transaction_city^3,
+         city_population2 = city_population^2,
+         city_population3 = city_population^3,
+         population_density2 = population_density^2,
+         population_density3 = population_density^3,
+         n_pharmacies2 = n_pharmacies^2,
+         n_pharmacies3 = n_pharmacies^3,
+         n_schools2 = n_schools^2,
+         n_schools3 = n_schools^3,
+         n_transport_salespoints2 = n_transport_salespoints^2,
+         n_transport_salespoints3 = n_transport_salespoints^3)
+
+
+df_pharmacies_full_feaure <- df_feature |> 
+ dplyr::select(-n_pharmacies2, -n_pharmacies3, -pcg_age_0_24)
+
+df_schools_full_feature <- df_feature |> 
+  dplyr::select(-n_schools2, -n_schools3, -pcg_num_transaction_norm_city)
+
+df_transport_full_feature <- df_feature |>
+  dplyr::select(-n_transport_salespoints3, -n_transport_salespoints2, -pcg_age_0_24, -pcg_num_transaction_norm_city)
+```
+
+## 1. Model on number of pharmacies
+
+In this chapter, the available data will be used to indicate what factors explain the number of pharmacies in census sections as well as whether census sections have enough or too few pharmacies.
+
+### Feature selection I
+
+To reduce dimenisionality, Lasso regression is applied, reducing the number of variables in the model. Lasso regression is able to shrink slopes all the way to 0 and is therefore able to make uncontributing variables disappear. The variables that are left by the lasso regression are stored in in a new data frame called df_pharmacies. Then, the correlation matrix of the independent variables and the the dependent variable: n_pharmacies is generated. One should note that these correlations are rather low. Hereafter, a robust correlation is computed to control for possible outliers affecting the correlations. The correlations maintain low. One should note that correlations are at the basis of most regression algorithms. These low correlations forecasts a final regression model with low explanability.
+
+```{r, warning=FALSE, fig.width=12, fig.height=6}
+
+lambda <- 10^seq(-3, 3, length = 100)
+
+lasso <- train(
+  n_pharmacies ~., data = df_2, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda)
+)
+
+coef(lasso$finalModel, lasso$finalModel$lambdaOpt)
+
+lasso_coef <- coef(lasso$finalModel, s = lasso$finalModel$lambdaOpt)
+
+non_zero_vars <- rownames(lasso_coef)[lasso_coef[, 1] != 0]
+non_zero_vars <- non_zero_vars[-1]
+
+df_pharmacies <- df_2 |> 
+  dplyr::select(all_of(non_zero_vars), n_pharmacies)
+
+#Chekcing correlations -> low correlations
+corr<- cor(df_pharmacies$n_pharmacies, df_pharmacies[,-"n_pharmacies"])
+corr<-round(corr,4)
+
+barplot(corr, names.arg = names(df_pharmacies[,-"n_pharmacies"]), col = "steelblue", las = 2 , adj = 0.45, main = "Correlation with n_pharmacies")
+```
+
+```{r warning=FALSE}
+#check for iqr = 0 variables to do robust corrlations
+iqr_values <- apply(df_pharmacies, 2, IQR)
+
+take_out_list<-names(iqr_values[iqr_values == 0])
+
+#Taking out 0 IQR  and colniliarities
+df_phar_corr<- df_pharmacies |> 
+  dplyr::select(-take_out_list) |> 
+  drop_na()
+
+#Robust correlations
+ccs<-cov.rob(df_phar_corr)
+cor2<-cov2cor(ccs$cov)
+corrplot::corrplot(cor2, number.cex = 0.4, tl.cex = 0.7)
+
+```
+
+### Feature selection II
+
+In this section, a Lasso regression is performed again, this time including the feature engineered variables. The selected variables are stored in the data frame df_pharmacies_feature. Most correlations maintain fairly low.
+
+```{r,  warning=FALSE, fig.width=12, fig.height=6}
+
+lasso <- train(
+  n_pharmacies ~., data = df_pharmacies_full_feaure, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda)
+)
+lasso_coef <- coef(lasso$finalModel, s = lasso$finalModel$lambdaOpt)
+
+non_zero_vars <- rownames(lasso_coef)[lasso_coef[, 1] != 0]
+non_zero_vars <- non_zero_vars[-1]
+
+df_pharmacies_feature <- df_feature |> 
+  dplyr::select(all_of(non_zero_vars), n_pharmacies)
+
+#Chekcing correlations -> low correlations
+corr<- cor(df_pharmacies_feature$n_pharmacies, df_pharmacies_feature[,-"n_pharmacies"])
+corr<-round(corr,4)
+barplot(corr, names.arg = names(df_pharmacies_feature[,-"n_pharmacies"]), col = "steelblue", las = 2 , main = "Correlation with n_pharmacies")
+```
+
+### Setting up train and test data
+
+The data frames df_pharmacies_feature and df_pharmacies are partitioned into train and test data sets with the train data sets containing 80% of the data and the test data sets the remaining 20%. The data frames with and without the feature engineered are partitioned to test in the next section the effect on the $R^2$ of the feature engineered variables. The train control is set to cross validation and the number of iterations to 10.
+
+```{r}
+set.seed(123)
+
+training.samples <- df_pharmacies_feature$n_pharmacies |> 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df_pharmacies_feature[training.samples, ]
+test.data <- df_pharmacies_feature[-training.samples, ]
+
+training.samples_sim <- df_pharmacies$n_pharmacies |> 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data_sim  <- df_pharmacies[training.samples_sim, ]
+test.data_sim <- df_pharmacies[-training.samples_sim, ]
+
+train_control <- trainControl(method = "cv", number = 10) 
+
+```
+
+### Regression models
+
+#### Linear model
+
+The linear model for the train data including the feature engineered variables and train data without these variables are computed. The linear model that includes the feature engineered variables shows a slightly higher $R^2$ and therefore the data frame including these feature engineered variables is selected to do the following regression analysis. However, one should note that the difference in $R^2$ is minimal and is most probably induced by the higher number of variables in the model including feature engineered variables.
+
+```{r}
+lm_model <- glm(n_pharmacies ~., data = train.data)
+
+lm_fit <- train(n_pharmacies ~., data = train.data, 
+                method = "lm", 
+                trControl = train_control) 
+
+
+lm_fit_sim <- train(n_pharmacies ~., data = train.data_sim, 
+                method = "lm", 
+                trControl = train_control)
+
+
+results <- resamples(list(linear = lm_fit, linear_sim = lm_fit_sim))
+summary(results)
+dotplot(results)
+```
+
+#### Poisson
+
+The poisson regression model is trained as this model is designed to estimate models with a non-negative discrete outcome variable which perfectly suits the ouctome variable n_pharmacies (see descriptive statistics) The poisson regression model, models lambda as a linear function of the independent variables: $[E|Y] = \lambda = exp( \alpha_0+\alpha_1x_1+\alpha_2x_2...)$. Note that the variance of Y should be equal to lambda. The poisson model does not improve the MAE, RMSE and $R^2$ considerably compared to the linear model.
+
+```{r}
+
+poisson_model <- glm(n_pharmacies ~ ., data = train.data, family = poisson )
+
+poisson_fit <- train(n_pharmacies ~ ., data = train.data, 
+                     method = "glm", family = poisson,
+                     trControl = train_control)
+
+results <- resamples(list(linear = lm_fit, poisson =poisson_fit))
+summary(results)
+dotplot(results)
+```
+
+#### Quasi-poisson regression
+
+A possible issue for the poisson model is when the variance is significantly larger than the mean and overdispersion occurs. The quasi-poisson model is able to combat this as it assumes that variance can be modeled as a linear function of the mean and computes an overdispersion factor $\phi$ relating to the mean and variance: $Var(Y) = \phi * mean(Y)$ Hence, overdispersion is checked using the poisson model, however, no overdispersion was detected. Regardless, the quasi-poisson model is utilized. This quasi-poisson model does not improve the MAE, RMSE and $R^2$ considerably compared to the former three models.
+
+```{r}
+
+#Checking overdispersion -> no overdispersion detected
+poisson_model <- glm( n_pharmacies~ ., family = poisson, data = df_pharmacies_feature)
+check_overdispersion(poisson_model)
+
+quasipoisson_model <- glm(n_pharmacies ~ ., data = train.data, family = quasipoisson )
+
+
+quasipoisson_fit <- train(n_pharmacies ~., data = train.data, 
+                     method = "glm", family = "quasipoisson",
+                     trControl = train_control)
+
+
+results <- resamples(list(linear = lm_fit, poisson = poisson_fit, quasipoisson = quasipoisson_fit))
+summary(results)
+
+dotplot(results)
+
+```
+
+#### Negative binomial regression analysis
+
+The negative binomial model is again an algorithm that compensates for overdispersion by adding an overdispersion factor $\phi$ relating to the mean and variance: $Var(Y) = mean (Y) +\phi * mean(Y)^2$ . Again this model is utilised regardless of the lack of overdispersion. Again the negative model does not improve the MAE, RMSE and $R^2$ considerably compared to the former two models.
+
+```{r, warning=FALSE}
+
+negbin_model <- glm.nb(n_pharmacies ~ ., data = train.data)
+
+neg_bin_fit <- train(n_pharmacies ~., data = train.data, 
+                     method = "glm.nb",
+                     trControl = train_control)
+
+#Comparing all models 
+results <- resamples(list(linear = lm_fit, poisson = poisson_fit, quasipoisson = quasipoisson_fit, negative_binomial = neg_bin_fit))
+summary(results)
+dotplot(results)
+
+```
+
+#### Ordered logistic regression
+
+As the outcome variable only has a limited range of discrete variables, these can be interpreted as being ordered categories. Hence, an ordered logistic regression can be utilised. As there are only few observations for 2 or more pharmacies, these are combined as n_pharmacies_cat: \>2. Unfortunately, this method does not produce an MAE, RMSE and $R^2$. However, as the outcomes of these metrics were very similar fro the models above, it is difficult to choose the best method based on these metrics. Therefore, the AIC's (Akaike Information Criterion) from the models are compared to decide on the best method. The AIC evaluates the goodness of fit of statistical model taking into account the ability to explain data as well as the complexity of the model. As the AIC function is not compatible with the train function from the 'Caret' package, for each method the model is computed using the 'glm' function to compare the AIC's. The model with the lowest AIC is the negative binomial model. Hence, this model will be used to do the final predictions.
+
+```{r, results='hide'}
+
+train.data_2<- train.data |> 
+ mutate(n_pharmacies_cat = case_when(
+            n_pharmacies ==0 ~"0",
+            n_pharmacies ==1 ~"1",
+            n_pharmacies >=2 ~">2")) |> 
+  dplyr::select(-n_pharmacies)
+
+train.data_2$n_pharmacies_cat <- factor(
+  train.data_2$n_pharmacies_cat, 
+  levels = c("0", "1", ">2"),
+  ordered = TRUE
+)
+
+multinom_model <- multinom(n_pharmacies_cat ~ ., data = train.data_2)
+
+
+```
+
+```{r warning=FALSE}
+# Compare models using Achaiche information criteria (AIC)
+aic_results <- AIC(lm_model, poisson_model, quasipoisson_model, negbin_model, multinom_model)
+
+# Show results
+list(AIC = aic_results)
+
+```
+
+#### Validation of the best model: Negative binomial
+
+The negative binomial model is validated by computing predictions based on the the test data. When plotting the predicted vs the actual values, the plot demonstrates that the model does not predict perfectly. Both the RMSE as well as the MSE are rather low values which indicate good model performance. As the MAE is 0.56, on average the model predictions are imprecise with 0.56 units. The RMSE value is somewhat larger as RMSE penalises large errors. The RMSE is 0.68, that is, on average the model predictions are imprecise with 0.68 units.
+
+```{r}
+predictions <- predict(neg_bin_fit, newdata = test.data)
+
+summary(predictions)
+
+actual_values <- test.data$n_pharmacies
+
+mae <- mean(abs(predictions - actual_values))
+mae
+rmse <- sqrt(mean((predictions - actual_values)^2))
+rmse
+
+rounded_predictions <- round(predictions)
+
+ggplot(data = test.data, aes(x = rounded_predictions, y = n_pharmacies)) +
+  geom_jitter(width = 0.2, alpha = 0.5)+
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Predicted vs. Actual",
+       x = "Predicted Values",
+       y = "Actual Values")
+
+```
+
+#### Model interpretation based on the best model: Negative binomial model
+
+The negative binomial model is trained with the full data frame. The coefficients are exponentiated as the coefficients produced by the model are in a log scale. The variables 'population', 'income_per_capita', 'avg_age', 'ratio_expense_home', 'city_population', 'population_density', 'income_per_capita_3', 'spanish_3', 'pcg_expense_home_2', 'pcg_num_transaction_city_3', 'population_density2' and 'population_density3' have a coefficient that is statistically significantly different from 0 (p\<0.05). Only the raw significant variables are interpreted. The variable 'population' has an exponentiated coefficient of 1.0002, that is, for each person increase in population in the census section, the count of pharmacies in that census section increases with 0.0002%. One should note that the median population per city is 1381 and therefore an increase of 1 person is a small unit increase in population and thus a small effect is expected. 'Income_per_capita' has a exponentiated coefficient of 1.00004 which is again a very minimal effect. The median of 'income_per_capita' is 13046. Hence, to better interpret the effect, the coefficienet (before exponentiating) is multiplied by 1000, which gives us the coefficient for a 1000 unit increase in 'income_per_capita'. When this multiplication is exponentiated, the coefficient is 1.0375 (income_per_capita_1000.) In other words, for every €1000 increase in 'income_per_capita the count of pharmacies in that census section increases with 3.75%. The coefficient for the variable 'city_population' seems to have no effect as the exponentiated coefficient is 1. However, as the median is large: 3223334, and thus a one unit increase is nihil, the method explained above is applied which gives an exponentiated coefficient of 1.00038 (city_population_10.000), that is for every 10.000 people increase in city population, the count of pharmacies in that census section increases with 0.0004%. For each year increase in 'avg_age', for each unit increase in 'ratio_expense_home' and for each person increase in 'population_density', the count of pharmacies increases with 0.0079%, 0.0057% and 0.00001% respectively. All in all, the impact of these variables on the number of pharmacies is small. However, one should also note that the feature engineered variables in the model cause multicolinearity (see VIF values) which surpres the coefficients. Therefore, the interpretation of the coefficients is not fully reliable.
+
+```{r, warning=FALSE}
+neg_bin_fit_final <- train(n_pharmacies ~., data = df_pharmacies_feature, 
+                     method = "glm.nb",
+                     trControl = train_control)
+summary(neg_bin_fit_final)
+
+coef_summary <- coef(summary(neg_bin_fit_final))
+
+# Exponentiating coefficients
+exp_coefficients <- round(exp(coef_summary[, "Estimate"]),5)
+exp_coefficients
+
+
+summary(df_pharmacies_feature$population)
+summary(df_pharmacies_feature$income_per_capita)
+summary(df_pharmacies_feature$city_population)
+
+
+income_per_capita_1000<-exp(0.000036849403203302837*1000)
+income_per_capita_1000
+city_population_10.000<-exp(0.0000000378413654670*10000)
+city_population_10.000
+
+negbin_model <- glm.nb(n_pharmacies ~ ., data =df_pharmacies_feature )
+vif_values <- car::vif(negbin_model)
+print(vif_values)
+
+```
+
+### Score generation
+
+A score is generated to indicate when a city has sufficient facilities and when too few. According to statista.com, Spain has an average of 4.7 pharmacies per 10.000 people. This treshold is used to indicate whether a city has sufficient, 4.7 or more pharamcies per 10.000 people, or too few pharmacies, less than 4.7 pharmacies per 10.000 people. The average number of pharmacies per 10.000 people in this data set is computed by the metric: ( n_pharmacies/population)\*10000. Then, this metric is scored 0 = too few pharmacies, when the metric is below the national average of 4.7 and 1 = sufficient when the metric is equal or above the national average creating the score_pharmacies variable.
+
+```{r}
+#https://www.statista.com/statistics/778862/number-of-pharmacies-in-spain/#:~:text=From%202007%20to%202022%2C%20the,4.7%20pharmacies%20per%2010%2C000%20inhabitants.
+
+df_pharmacies_feature<-df_pharmacies_feature |> 
+  mutate(metric = (n_pharmacies/population)*10000) |> 
+  mutate(score_pharmacies = if_else(metric<4.7, 0,1))
+
+
+ggplot(df_pharmacies_feature, aes(score_pharmacies))+
+  geom_bar()
+
+```
+
+### Training logistic regression
+
+In case of a binomial outcome variable, the most common method to be applied is logistic regression. Also, as we only ave been taught this method, no other models will be trained to select the best model. However, the logistic regression is first trained with training data and later validated using testing data to be able to test model accuracy.
+
+```{r}
+df_pharmacies_feature_2 <- df_pharmacies_feature |> 
+  dplyr::select(-n_pharmacies, -metric)
+
+training.samples <- df_pharmacies_feature_2$score_pharmacies |>  
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df_pharmacies_feature_2[training.samples, ]
+test.data <- df_pharmacies_feature_2[-training.samples, ]
+
+
+logistic_fit_train <- glm(score_pharmacies ~., data =train.data , family = binomial)
+
+```
+
+#### Validating logistic regression
+
+The graph plotting the actual values against the predicted values shows that the model does not perfectly predict the actual values. According to the output of the confusion matrix, the accuracy of the model is 0.65. As accuracy = Number of correct predictions\\Total number of predictions, 65% of the predictions provided by this model are correct. The sensitivity of the model is 0.66, that is, 66% of the actual positive cases are correctly classified by the model as positive. In other words, for all cases in which there are enough pharmacies, the model correctly identifies enough pharmacies for 66% of these cases. The specificity of the model is 0.64 that is, 64% of the actual negative cases are correctly classified by the model as negative. In other words, for all cases in which there are too few pharmacies, the model correctly identifies there being too few pharmacies for 64% of these cases. The model seems to be almost equally good in predicting positive and negative cases. In combination with the accuracy one could conclude that the model is moderately good at predicting which is viusalised with the ROC curve as the curve is rather close to the random classifier (red dashed line) and relatively far from the perfect classifier (0,1).
+
+```{r}
+
+# Make predictions
+probabilities <- logistic_fit_train |>  predict(test.data, type = "response")
+rounded_probabilities <- round(probabilities)
+
+ggplot(data = test.data, aes(x = rounded_probabilities, y = score_pharmacies)) +
+  geom_jitter(width = 0.2, alpha = 0.5)+
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Predicted vs. Actual",
+       x = "Predicted Values",
+       y = "Actual Values")
+
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+
+table(test.data$score_pharmacies)
+
+#Confusion matrix 
+confusionMatrix(as.factor(test.data$score_pharmacies), as.factor(predicted.classes))
+
+```
+
+```{r, results='hide'}
+#Creating roc curve
+roc <- roc(as.factor(test.data$score_pharmacies), probabilities) 
+
+```
+
+```{r}
+sens <- roc$sensitivities
+spec <- roc$specificities
+
+ggplot(data.frame(sens,spec), aes(x=1-spec, y=sens)) + geom_line()+
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red")+
+  labs(title = "ROC Curve")
+```
+
+#### Model interpretation and visualisation
+
+The coefficients are exponentiated as the coefficients produced by the model are in a log scale in order to make the interpretation of the coefficients easier. The variables 'population', 'income_per_capita', 'avg_age', 'pcg_num_transaction_city', 'city_population', 'population_density', 'population3', 'income_per_capita_3', 'spanish_3', 'pcg_num_transaction_city_3', 'population_density2' and 'population_density3' have a coefficient that is statistically significantly different from 0. Only the raw significant variables are interpreted. For every person increase in population, every euro increase in 'income_per_capita', every year increase in 'avg_age', every percentage increase in 'pcg_num_transaction_city' and every person increase in 'population_density', the odds of score_pharmacies =1, that is the city has enough pharmacies, is multiplied by 1.0016, 1.0001, 1.0381, 1.0526 and 1.0001 respectively. In other words, these variabls have a positive effect on the odds of a census section having enough pharmacies. Note that again the model has a problem with multicolinearity (see VIF) and hence the coefficients are not fully reliable.
+
+The two plots below show the binomial relationship between the probabilities of having enough pharmacies and the distribution of 'population_density' and 'avg_age' respectively and show that the values of both independent variables are highly similar for n_pharmacies is 1 or 0 explaining the minimal effect on the outcome variable. Note that there seems to be a problem with the population variable as the direction of the plotted curve seems to be negative rather than positive.
+
+```{r}
+
+logistic_fit <- glm(score_pharmacies ~., data =df_pharmacies_feature_2 , family = binomial)
+summary(logistic_fit)
+
+# Extracting coefficients using summary()
+coef_summary <- coef(summary(logistic_fit))
+
+options(scipen = 999)
+# Exponentiating coefficients
+exp_coefficients <- round(exp(coef_summary[, "Estimate"]),5)
+exp_coefficients
+options(scipen = 0)
+
+vif_values <- car::vif(logistic_fit)
+print(vif_values)
+
+
+#Prediction by population
+df_pharmacies_feature_2|> 
+  ggplot(aes(population, score_pharmacies)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model", 
+    x = "Population",
+    y = "Probability of having enough pharmacies"
+    )
+
+
+#Prediction by avg_age 
+df_pharmacies_feature_2 |> 
+  ggplot(aes(avg_age , score_pharmacies)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model", 
+    x = "average age ",
+    y = "Probability of having enough pharmacies"
+    )
+
+```
+
+## 2. Model on number of schools
+
+In this chapter, the available data will be used to indicate what factors explain the number of schools in census sections as well as whether census sections have enough or too few schools. As the steps for this analysis share a great overlap with the steps performed in the analysis of number of pharmacies, the more general explanations and reasoning behind certain steps will not be repeated, and the focus will be mainly on the interpretation of the results.
+
+### Feature selection I
+
+In this section feature selection based on the data frame without feature engineered variables using Lasso regression is performed. The correlation matrix shows that there are multicolinearities among some of the independent variables. The correlations of the selected variables with the dependent variable n_schools are rather low. These low correlations forecasts a final regression model with low explanability.
+
+```{r, warning=FALSE, fig.width=12, fig.height=6}
+
+lasso <- train(
+  n_schools ~., data = df_2, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda)
+)
+
+#Retrieving coefficients
+coef(lasso$finalModel, lasso$finalModel$lambdaOpt)
+
+
+# Extract coefficients for the optimal lambda
+lasso_coef <- coef(lasso$finalModel, s = lasso$finalModel$lambdaOpt)
+
+# Identify variables with non-zero coefficients and create list
+non_zero_vars <- rownames(lasso_coef)[lasso_coef[, 1] != 0]
+non_zero_vars <- non_zero_vars[-1]
+
+#Keep only non zero coefficients
+df_schools <- df_2 |> 
+  dplyr::select(all_of(non_zero_vars), n_schools)
+
+#Chekcing correlations
+corr<- cor(df_schools)
+corrplot::corrplot(corr, number.cex = 0.4, tl.cex = 0.7)
+
+#Chekcing correlations -> low correlations
+corr<- cor(df_schools$n_schools, df_schools[,-"n_schools"])
+corr<-round(corr,4)
+barplot(corr, names.arg = names(df_schools[,-"n_schools"]), col = "steelblue", las = 2 , main = "Correlation with number of schools")
+```
+
+### Feature selection II
+
+In this section feature selection based on the data frame with feature engineered variables is performed. The correlations of the selected variables with the dependent variable n_schools are rather low. These low correlations forecasts again a final regression model with low explanability.
+
+```{r, warning=FALSE, fig.width=12, fig.height=6}
+
+df_schools_full_feature<- df_schools_full_feature |> 
+  drop_na()
+
+lasso <- train(
+  n_schools ~., data = df_schools_full_feature, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda)
+)
+
+# Extract coefficients for the optimal lambda
+lasso_coef <- coef(lasso$finalModel, s = lasso$finalModel$lambdaOpt)
+
+# Identify variables with non-zero coefficients and create list
+non_zero_vars <- rownames(lasso_coef)[lasso_coef[, 1] != 0]
+non_zero_vars <- non_zero_vars[-1]
+
+#Keep only non zero coefficients
+df_schools_feature <- df_schools_full_feature |> 
+  dplyr::select(all_of(non_zero_vars), n_schools)
+
+#Chekcing correlations -> low correlations
+corr<- cor(df_schools_feature$n_schools, df_schools_feature[,-"n_schools"])
+corr<-round(corr,4)
+barplot(corr, names.arg = names(df_schools_feature[,-"n_schools"]), col = "steelblue", las = 2 , main = "Correlation with number of schools")
+
+```
+
+### Setting up test and train data
+
+```{r}
+set.seed(456)
+training.samples <- df_schools_feature$n_schools |> 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df_schools_feature[training.samples, ]
+test.data <- df_schools_feature[-training.samples, ]
+
+training.samples_sim <- df_schools$n_schools |> 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data_sim  <- df_schools[training.samples_sim, ]
+test.data_sim <- df_schools[-training.samples_sim, ]
+
+train_control <- trainControl(method = "cv", number = 10) 
+
+```
+
+### Regression models
+
+#### Linear model
+
+The linear model including the feature engineered variables shows a slightly higher $R^2$ and therefore the data frame including these feature engineered variables is selected to do the following regression analysis. However, one should note that the difference in $R^2$ is minimal and is most probably induced by the higher number of variables in the model including feature engineered variables.
+
+```{r}
+lm_model <- lm(n_schools ~ ., data = train.data)
+
+lm_fit <- train(n_schools ~., data = train.data, 
+                method = "lm", 
+                trControl = train_control) 
+
+lm_fit_sim <- train(n_schools ~., data = train.data_sim, 
+                method = "lm", 
+                trControl = train_control) 
+
+results <- resamples(list(linear = lm_fit, linear_sim = lm_fit_sim))
+summary(results)
+dotplot(results)
+```
+
+#### Poisson
+
+The first model being trained is the poisson regression model. This model is designed to estimate models with a non-negative discrete outcome variable [see Poisson chapter 1 for more information]. The poisson model does not improve the MAE, RMSE and $R^2$ considerably compared to the linear model.
+
+```{r}
+
+poisson_model <- glm(n_schools ~ ., data = train.data, family = poisson )
+
+poisson_fit <- train(n_schools ~ ., data = train.data, 
+                     method = "glm", family = poisson,
+                     trControl = train_control)
+
+
+results <- resamples(list(linear = lm_fit, poisson =poisson_fit))
+summary(results)
+dotplot(results)
+```
+
+#### Quasi-poisson regression
+
+A possible issue for the poisson model is when the variance is significantly larger than the mean and overdispersion occurs. The quasi-poisson model is able to combat this as it assumes that variance can be modeled as a linear function of the mean and computes an overdispersion factor $\phi$ relating to the mean and variance: $Var(Y) = \phi * mean(Y)$ Hence, overdispersion is checked using the poisson model and overdispersion was detected. Again the quasi- poisson model does not improve the MAE, RMSE and $R^2$ considerably compared to the former two models.
+
+```{r}
+
+#Checking overdispersion -> Overdispersion detected
+poisson_model <- glm( n_schools~ ., family = poisson, data = df_schools_feature)
+check_overdispersion(poisson_model)
+
+quasipoisson_model <- glm(n_schools ~ ., data = train.data, family = quasipoisson )
+
+quasipoisson_fit <- train(n_schools ~., data = train.data, 
+                     method = "glm", family = "quasipoisson",
+                     trControl = train_control)
+
+results <- resamples(list(linear = lm_fit, poisson = poisson_fit, quasipoisson = quasipoisson_fit))
+summary(results)
+
+dotplot(results)
+
+```
+
+#### Negative binomial regression analysis
+
+The negative binomial model is again an algorithm that compensates for overdispersion by adding an overdispersion factor $\phi$ relating to the mean and variance: $Var(Y) = mean (Y) +\phi * mean(Y)^2$ . Again the negative model does not improve the MAE, RMSE and $R^2$ considerably compared to the former models.
+
+```{r, warning=FALSE}
+
+negbin_model <- glm.nb(n_schools ~ ., data = train.data)
+
+neg_bin_fit <- train(n_schools ~., data = train.data, 
+                     method = "glm.nb",
+                     trControl = train_control)
+
+
+results <- resamples(list(linear = lm_fit, poisson = poisson_fit, quasipoisson = quasipoisson_fit, negative_binomial = neg_bin_fit))
+summary(results)
+dotplot(results)
+
+```
+
+#### Zero-inflated poisson model
+
+The zero-inflated poisson model combats the issue of an outcome variable with a large number of zeros in comparison with the rest of the values. This model is able to predict the zeros by using logistic regression whereas for the non zero values it uses poisson regression. Unfortunately, this method does not produce an MAE, RMSE and $R^2$. However, as the outcomes of these metrics were very similar fro the models above, it is difficult to choose the best method based on these metrics. Therefore, the AIC's (Akaike Information Criterion) from the models are compared to decide on the best method. The model with the lowest AIC is the negative binomial model. Hence, this model will be used to do the final predictions.
+
+```{r}
+zeroinfl_model <- zeroinfl(n_schools ~., data =  train.data)
+
+# Compare models using Achaiche information criteria (AIC)
+aic_results <- AIC(lm_model, poisson_model, quasipoisson_model, negbin_model, zeroinfl_model)
+
+# Show results
+list(AIC = aic_results)
+```
+
+#### Validation of the best model: Negative binomial
+
+The negative binomial model is validated by computing predictions based on the the test data. When plotting the predicted vs the actual values, the plot demonstrates that the model does not predict perfectly. Both the RMSE as well as the MSE are rather low values which indicate good model performance. As the MAE is 0.79, on average the model predictions are imprecise with 0.79 units. The RMSE value is somewhat larger as RMSE penalises large errors. The RMSE is 1.13, that is, on average the model predictions are imprecise with 1.13 units.
+
+```{r}
+predictions <- predict(neg_bin_fit, newdata = test.data)
+
+summary(predictions)
+
+actual_values <- test.data$n_schools
+
+
+mae<- mean(abs(predictions - actual_values))
+mae
+rmse <- sqrt(mean((predictions - actual_values)^2))
+rmse
+
+rounded_predictions <- round(predictions)
+
+ggplot(data = test.data, aes(x = rounded_predictions, y = n_schools)) +
+  geom_jitter(width = 0.2, alpha = 0.5)+
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Predicted vs. Actual",
+       x = "Predicted Values",
+       y = "Actual Values")
+
+```
+
+#### Model interpretation based on the best model: Negative binomial model
+
+For every person increase in 'population' the exponentiated coefficients are 1.0004, that is, for each person increase in population in a census section, the count of schools in a census section increases with 0.0004% (for explanation of this small coefficient see model interpretation of n_pharmacies). Also, for every percentage increase in 'europeans', and every person increase in 'population_density',the exponentiated coefficients are 0.0894 and 0.9999 respectively, and therefore the count of schools in that census section decreases with (1-0.0894 )\*100= 91.06 % and (1-0.9999)\*100 = 0.01% respectively. Note that the outcome of 'europeans' is rather implausible. All in all, the impact of these variables on the number of schools is small. However, one should also note that the feature engineered variables in the model cause multicolinearity (see VIF values) which surpres the coefficients. Therefore, the interpretation of the coefficients is not fully reliable.
+
+```{r, warning=FALSE}
+neg_bin_fit_final <- train(n_schools ~., data = df_schools_feature, 
+                     method = "glm.nb",
+                     trControl = train_control)
+summary(neg_bin_fit_final)
+
+coef_summary <- coef(summary(neg_bin_fit_final))
+
+options(scipen = 999)
+# Exponentiating coefficients
+exp_coefficients <- round(exp(coef_summary[, "Estimate"]),5)
+exp_coefficients
+options(scipen = 0)
+
+(1-0.0894)*100
+(1-0.9999)*100
+
+
+negbin_model <- glm.nb(n_schools ~ ., data =df_schools_feature )
+vif_values <- car::vif(negbin_model)
+print(vif_values)
+
+```
+
+### Score generation
+
+First the number of people between 0 and 24 years in 2021 was calculated based on data from 'Our world in data'. The the total number of 'Centros educativos' was retrieved from Spanish government sources. With this number the average number of schools per 1000 people in the age category 0 to 24 years was computed as follows: (total_centros_educativos/total_pop_0_24) \*10000. Then the total number of people in the age category 0 to 24 years was computed by multiplying the percentage of people in this age category per census section with the population per census section. Hereafter, a census section was coded to have too few schools if the number of schools per 1000 people between 0 and 24 was lower than the national average. 
+
+-   Population Spain 2021: <https://ourworldindata.org/grapher/population-by-age-group?tab=table&stackMode=relative>
+
+    -   15-24 = 4,886,323
+
+    -   5-14 = 4,801,967
+
+    -   \<5 = 1,896,972
+
+-   28.470 centros educativos: <https://www.educacionyfp.gob.es/dam/jcr:b9311a59-9e97-45e6-b912-7efe9f3b1f16/datos-y-cifras-2021-2022-espanol.pdf>
+
+```{r, warning=FALSE}
+
+total_pop_0_24 <- 4886323+4801967+1896972
+total_centros_educativos <- 28470
+avg_schools_0_24 <- (total_centros_educativos/total_pop_0_24) *10000 
+    #average number of schools per 10.000 inhabitants between 0 and 24
+  
+
+df_schools_feature <-  df_schools_feature |> 
+   mutate (pop_0_24 = pcg_age_0_24*population) |> #Number of people 0-24 in area
+   mutate (schools_0_24 = (n_schools/pop_0_24)*10000) |> #Number of schools per 10.000 people in araea
+  mutate(score_schools = if_else (schools_0_24 <avg_schools_0_24, 0,1)) 
+#Below average too few schools = 0
+  
+ggplot(df_schools_feature, aes(score_schools))+
+  geom_bar()
+  
+```
+
+### Training logistic regression
+
+A logistic regression is trained to predict whether a census section has sufficient or too few schools.
+
+```{r}
+
+df_schools_feature <- df_schools_feature |> 
+  drop_na(score_schools) 
+
+df_schools_feature_2 <- df_schools_feature |> 
+  dplyr::select(-altitude, -schools_0_24, -n_schools, -pop_0_24, -pcg_age_0_24   )
+
+training.samples <- df_schools_feature_2$score_schools |>  
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df_schools_feature_2[training.samples, ]
+test.data <- df_schools_feature_2[-training.samples, ]
+
+logistic_fit_train <- glm(score_schools ~., data = train.data, family = "binomial")
+
+```
+
+#### Validating logistic regression
+
+The graph plotting the actual values against the predicted values shows that the model does not perfectly predict the actual values. According to the output of the confusion matrix, the accuracy of the model is 0.68. As accuracy = Number of correct predictions\\Total number of predictions, 68% of the predictions provided by this model are correct. The sensitivity of the model is 0.71, that is, 71% of the actual positive cases are correctly classified by the model as positive. In other words, for all cases in which there are enough schools, the model correctly identifies enough schools for 71% of these cases. The specificity of the model is 0.60 that is, 60% of the actual negative cases are correctly classified by the model as negative. In other words, for all cases in which there are too few schools the model correctly identifies there being too few schools for 60% of these cases. The model seems to be almost equally good in predicting positive and negative cases. In combination with the accuracy one could conclude that the model is moderately good at predicting which is visualised with the ROC curve as the curve is rather close to the random classifier (red dashed line) and relatively far from the perfect classifier (0,1).
+
+```{r}
+
+# Make predictions
+probabilities <- logistic_fit_train |>  predict(test.data, type = "response")
+rounded_probabilities <- round(probabilities)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)# The treshold
+
+ggplot(data = test.data, aes(x = rounded_probabilities, y = score_schools)) +
+  geom_jitter(width = 0.2, alpha = 0.5)+
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Predicted vs. Actual",
+       x = "Predicted Values",
+       y = "Actual Values")
+
+table(test.data$score_schools)
+
+#Confusion matrix does not work
+confusionMatrix(as.factor(test.data$score_schools), as.factor(predicted.classes))
+
+
+```
+
+```{r, results='hide'}
+roc <- roc(as.factor(test.data$score_schools), probabilities) 
+
+```
+
+```{r }
+sens <- roc$sensitivities
+spec <- roc$specificities
+
+ggplot(data.frame(sens,spec), aes(x=1-spec, y=sens)) + geom_line()+
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red")+
+  labs(title = "ROC Curve")
+
+```
+
+#### Model interpretation and visualisation
+
+The coefficients are exponentiated as the coefficients produced by the model are in a log scale in order to facilitate interpretation. The variables 'population', 'avg_age', 'europeans', 'pcg_num_transaction_city', 'population_density', 'population3', 'income_per_capita_3' and 'europeans2' have a coefficient that is statistically significantly different from 0. Only the raw significant variables are interpreted. For every person increase in 'population', every year increase in 'avg_age' and every percentage increase in 'pcg_num_transaction_city' and , the odds of score_schools =1, that is the census section has enough schools, is multiplied by 1.0008, 1.0801 and 1.0526 respectively. These variables seen to have a positive impact on the number of schools. Also, for every percentage increase in 'europeans', the odds of score_schools = 1 are multiplied by 0.0003. Note that this outcome is highly implausible. For every person increase in 'population_density' the exponentiated coefficient is almost 1 and hence does not seem to have an impact on the dependent variable. Note that as explained earlier in this report, the unit increase of most of these variables are small causing the effects of a one unit increase on the outcome variable to be minimal. Moreover, one should note that again the model has a problem with multicolinearity (see VIF) and hence the coefficients are not fully reliable.
+
+The two plots below show the two significant and most highly related variables 'avg_age' and 'pcg_num_transaction_city'. The binomial relationships between the probabilities of having enough pharmacies and the distribution of 'avg_age' and 'pcg_num_transaction_city' respectively and show that the values of both independent variables are highly similar for score_schools is 1 or 0 explaining the minimal effect on the outcome variable.
+
+```{r}
+
+logistic_fit <- glm(score_schools ~., data =df_schools_feature_2 , family = binomial)
+summary(logistic_fit)
+
+# Extracting coefficients using summary()
+coef_summary <- coef(summary(logistic_fit))
+
+options(scipen = 999)
+# Exponentiating coefficients
+exp_coefficients <- round(exp(coef_summary[, "Estimate"]), 5)
+exp_coefficients
+options(scipen = 0)
+
+1-0.00024
+1-0.99995 
+
+
+#Predicted by avg_age
+df_schools_feature_2 |> 
+  ggplot(aes(avg_age, score_schools)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model", 
+    x = "Average age",
+    y = "Probability of having enough schools"
+    )
+
+
+#Predicted by pcg_num_transaction_city
+df_schools_feature_2|> 
+  ggplot(aes(pcg_num_transaction_city, score_schools)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model", 
+    x = "pcg_num_transaction_city",
+    y = "Probability of having enough schools"
+    )
+
+```
+
+## 3. Model transport sales points
+
+In this chapter, the available data will be used to indicate what factors explain the number of transport sale points in census sections as well as whether census sections have enough or too few transport sale points. As the steps for this analysis share a great overlap with the steps performed in the analysis of number of pharmacies, the more general explanations and reasoning behind certain steps will not be repeated, and the focus will be mainly on the interpretation of the results.
+
+### Feature selection I
+
+In this section feature selection based on the data frame without feature engineered variables is performed. The correlations of the selected variables with the dependent variable n_transport_salespoints are rather low. These low correlations forecasts a final regression model with low explanability.
+
+```{r, warning=FALSE, fig.width=12, fig.height=6}
+lasso <- train(
+  n_transport_salespoints ~., data = df_2, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda)
+)
+
+#Retrieving coefficients
+coef(lasso$finalModel, lasso$finalModel$lambdaOpt)
+
+
+# Extract coefficients for the optimal lambda
+lasso_coef <- coef(lasso$finalModel, s = lasso$finalModel$lambdaOpt)
+
+# Identify variables with non-zero coefficients and create list
+non_zero_vars <- rownames(lasso_coef)[lasso_coef[, 1] != 0]
+non_zero_vars <- non_zero_vars[-1]
+
+#Keep only non zero coefficients
+df_transport<- df_1 |> 
+  dplyr::select(all_of(non_zero_vars), n_transport_salespoints)
+
+#Chekcing correlations -> low correlations
+corr<- cor(df_transport$n_transport, df_transport[,-"n_transport_salespoints"])
+corr<-round(corr,4)
+barplot(corr, names.arg = names(df_transport[,-"n_transport_salespoints"]), col = "steelblue", las = 2 , main = "Correlation with number of transport sales points")
+
+```
+
+### Feature selection II
+
+In this section feature selection based on the data frame with feature engineered variables is performed. The correlations of the selected variables with the dependent variable n_transport_sales_points are rather low. These low correlations forecasts again a final regression model with low explanability.
+
+```{r, warning=FALSE, fig.width=12, fig.height=6}
+
+df_transport_full_feature<- df_transport_full_feature |> 
+  drop_na()
+
+lasso <- train(
+  n_transport_salespoints ~., data = df_transport_full_feature, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda)
+)
+
+# Extract coefficients for the optimal lambda
+lasso_coef <- coef(lasso$finalModel, s = lasso$finalModel$lambdaOpt)
+
+# Identify variables with non-zero coefficients and create list
+non_zero_vars <- rownames(lasso_coef)[lasso_coef[, 1] != 0]
+non_zero_vars <- non_zero_vars[-1]
+
+#Keep only non zero coefficients
+df_transport_feature <- df_transport_full_feature |> 
+  dplyr::select(all_of(non_zero_vars), n_transport_salespoints)
+
+#Chekcing correlations -> low correlations
+corr<- cor(df_transport_feature$n_transport, df_transport_feature[,-"n_transport_salespoints"])
+corr<-round(corr,4)
+barplot(corr, names.arg = names(df_transport_feature[,-"n_transport_salespoints"]), col = "steelblue", las = 2 , main = "Correlation with number of transport sales points")
+
+
+```
+
+### Setting up test and training data
+
+```{r}
+set.seed(456)
+training.samples <- df_transport_feature$n_transport_salespoints |> 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df_transport_feature[training.samples, ]
+test.data <- df_transport_feature[-training.samples, ]
+
+training.samples_sim <- df_transport$n_transport_salespoints |> 
+  createDataPartition(p = 0.8, list = FALSE)
+train.data_sim  <- df_transport[training.samples_sim, ]
+test.data_sim <- df_transport[-training.samples_sim, ]
+
+train_control <- trainControl(method = "cv", number = 10) 
+```
+
+### Regression models
+
+#### Linear model
+
+The linear model including the feature engineered variables shows a slightly higher $R^2$ and therefore the data frame including these feature engineered variables is selected to do the following regression analysis. However, one should note that the difference in $R^2$ is minimal and is most probably induced by the higher number of variables in the model including feature engineered variables.
+
+```{r}
+
+lm_model <- lm(n_transport_salespoints ~ ., data = train.data)
+
+lm_fit <- train(n_transport_salespoints ~., data = train.data, 
+                method = "lm", 
+                trControl = train_control) 
+
+
+lm_fit_sim <- train(n_transport_salespoints ~., data = train.data_sim, 
+                method = "lm", 
+                trControl = train_control) 
+
+
+results <- resamples(list(linear = lm_fit, linear_sim = lm_fit_sim))
+summary(results)
+dotplot(results)
+
+```
+
+#### Poisson
+
+The poisson regression model is trained as this model is designed to estimate models with a non-negative discrete outcome variable [see Poisson chapter 1 for more information]. The poisson model does not improve the MAE, RMSE and $R^2$ considerably compared to the linear model.
+
+```{r}
+
+poisson_fit <- train(n_transport_salespoints ~ ., data = train.data, 
+                     method = "glm", family = poisson,
+                     trControl = train_control)
+
+
+results <- resamples(list(linear = lm_fit, poisson =poisson_fit))
+summary(results)
+dotplot(results)
+```
+
+#### Quasi-poisson regression
+
+A possible issue for the poisson model is when the variance is significantly larger than the mean and overdispersion occurs. The quasi-poisson model is able to combat this as it assumes that variance can be modeled as a linear function of the mean and computes an overdispersion factor $\phi$ relating to the mean and variance: $Var(Y) = \phi * mean(Y)$ Hence, overdispersion is checked using the poisson model, however, no overdispersion was detected. Again the quasi- poisson model does not improve the MAE, RMSE and $R^2$ considerably compared to the former two models.
+
+```{r}
+
+#Checking overdispersion -> No overdispersion detected
+poisson_model <- glm( n_transport_salespoints~ ., family = poisson, data = df_transport_feature)
+
+check_overdispersion(poisson_model)
+
+quasipoisson_model <- glm( n_transport_salespoints~ ., family = quasipoisson, data = train.data)
+
+quasipoisson_fit <- train(n_transport_salespoints~., data = train.data, 
+                     method = "glm", family = "quasipoisson",
+                     trControl = train_control)
+
+results <- resamples(list(linear = lm_fit, poisson = poisson_fit, quasipoisson = quasipoisson_fit))
+summary(results)
+
+dotplot(results)
+
+```
+
+#### Negative binomial regression analysis
+
+The negative binomial model is again an algorithm that compensates for overdispersion by adding an overdispersion factor $\phi$ relating to the mean and variance: $Var(Y) = mean (Y) +\phi * mean(Y)^2$ . Again the negative model does not improve the MAE, RMSE and $R^2$ considerably compared to the former models. As the outcomes of these metrics were very similar for all of the models above, it is difficult to choose the best method based on these metrics. Therefore, the AIC's from the models are compared to decide on the best method. The model with the lowest AIC is the negative binomial model. Hence, this model will be used to do the final predictions.
+
+```{r, warning=FALSE}
+
+negbin_model <- glm.nb(n_transport_salespoints ~ ., data = train.data)
+
+neg_bin_fit <- train(n_transport_salespoints ~., data = train.data, 
+                     method = "glm.nb",
+                     trControl = train_control)
+
+results <- resamples(list(linear = lm_fit, poisson = poisson_fit, quasipoisson = quasipoisson_fit, negative_binomial = neg_bin_fit))
+summary(results)
+dotplot(results)
+
+# Compare models using Achaiche information criteria (AIC)
+aic_results <- AIC(lm_model, poisson_model, quasipoisson_model, negbin_model)
+
+# Show results
+list(AIC = aic_results)
+
+```
+
+#### Validation of the best model: Negative binomial
+
+The negative binomial model is validated by computing predictions based on the the test data. When plotting the predicted vs the actual values, the plot demonstrates that the model does not predict well the non zero values. Both the RMSE as well as the MSE are rather low values which indicate good model performance. As the MAE is 0.37, on average the model predictions are imprecise with 0.37 units. The RMSE value is somewhat larger as RMSE penalises large errors. The RMSE is 0.49, that is, on average the model predictions are imprecise with 0.49 units.
+
+```{r}
+predictions <- predict(neg_bin_fit, newdata = test.data)
+
+summary(predictions)
+
+rounded_predictions <- round(predictions)
+
+actual_values <- test.data$n_transport_salespoints
+
+mae<- mean(abs(predictions - actual_values))
+mae
+rmse <- sqrt(mean((predictions - actual_values)^2))
+rmse
+
+ggplot(data = test.data, aes(x = rounded_predictions, y = n_transport_salespoints)) +
+  geom_jitter(width = 0.2, alpha = 0.5)+
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Predicted vs. Actual",
+       x = "Predicted Values",
+       y = "Actual Values")
+```
+
+#### Model interpretation based on the best model: Negative binomial model
+
+The variables with a coefficient significantly different from zero are 'population', 'income_per_capita', 'avg_age', 'pcg_num_transaction_city', 'n_pharmacies', 'pcg_expense_home', 'income_per_capita_3' and 'pcg_num_transaction_city_3'. Only the raw variables will be interpreted. For every person increase in 'population', every euro increase in 'income_per_capita', every year increase in 'avg_age', every percentage increase in 'pcg_num_transaction_city', every extra 'n_pharmacies' in a census section, the exponentiated coefficients are 1.0004, 1.0739, 1.0967 and 1.5661 respectively, that is, for each unit increase in the aforementioned variables, the count of number of transport sales points in a census section increase with 0.0004%, 0.0739%, 0.0967% and 0.5661% respectively. Note that the number of pharmacies is strongly associated with the number of transport sales points. Moreover, for each percentage increase in pcg_expense_home the exponentiated coefficient is 0.9941, that is for each percentage increase the count of number of transport sales points in a census section decreases with 0.0051%.
+
+```{r, warning=FALSE}
+neg_bin_fit_final <- train(n_transport_salespoints ~., data = df_transport_feature, 
+                     method = "glm.nb",
+                     trControl = train_control)
+summary(neg_bin_fit_final)
+coef_summary <- coef(summary(neg_bin_fit_final))
+
+options(scipen = 999)
+exp_coefficients <- round(exp(coef_summary[, "Estimate"]),5)
+exp_coefficients
+options(scipen = 0)
+
+1-0.99481
+
+```
+
+### Score generation
+
+The score to indicate whether a census section has sufficient or too few transport sales points is generated as follows. If the population is below 1000 one could argue that a transport sales point is not needed or infeasible. In this case, a score will be appointed of a value of 1 indicating there are enough transport sales points. In case of a population larger than 1000, if there is no sales point, it is appointed 0 indicating not enough and 1 sufficient if there is at least 1.
+
+```{r}
+
+df_transport_feature_log <-  df_transport_feature |> 
+  mutate(score_transport = if_else (population <1000, 1, if_else (n_transport_salespoints <1, 0,1))) |> 
+  dplyr::select(-n_transport_salespoints, -population)
+
+```
+
+### Training logistic regression
+
+A logistic regression is trained to predict whether a census section has sufficient or too few transport sales points.
+
+```{r}
+
+set.seed(8910)
+training.samples <- df_transport_feature_log$score_transport |>  
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- df_transport_feature_log[training.samples, ]
+test.data <- df_transport_feature_log[-training.samples, ]
+
+logistic_fit_train <- glm(score_transport ~., data =train.data , family = binomial)
+
+```
+
+#### Validating logistic regression
+
+The graph plotting the actual values against the predicted values shows that the model does not perfectly predict the actual values. According to the output of the confusion matrix, the accuracy of the model is 0.66. As accuracy = Number of correct predictions\\Total number of predictions, 66% of the predictions provided by this model are correct. The sensitivity of the model is 0.71, that is, 71% of the actual positive cases are correctly classified by the model as positive. In other words, for all cases in which there are enough number of transport sales points, the model correctly identifies enough enough number of transport sales points for 71% of these cases. The specificity of the model is 0.57 that is, 57% of the actual negative cases are correctly classified by the model as negative. In other words, for all cases in which there are too few schools the model correctly identifies there being too few schools for 57% of these cases. The model seems to be better at predicting positive than negative cases. In combination with the accuracy one could conclude that the model is moderately good at predicting which is visualised with the ROC curve as the curve is rather close to the random classifier (red dashed line) and relatively far from the perfect classifier (0,1).
+
+```{r}
+
+# Make predictions
+probabilities <- logistic_fit_train |>  predict(test.data, type = "response")
+rounded_probabilities <- round(probabilities)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+
+ggplot(data = test.data, aes(x = rounded_probabilities, y = score_transport)) +
+  geom_jitter(width = 0.2, alpha = 0.5)+
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Predicted vs. Actual",
+       x = "Predicted Values",
+       y = "Actual Values")
+
+table(test.data$score_transport)
+
+confusionMatrix(as.factor(test.data$score_transport), as.factor(predicted.classes))
+
+```
+
+```{r, results='hide'}
+roc <- roc(as.factor(test.data$score_transport), probabilities) 
+```
+
+```{r}
+sens <- roc$sensitivities
+spec <- roc$specificities
+
+ggplot(data.frame(sens,spec), aes(x=1-spec, y=sens)) + geom_line()+
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red")+
+  labs(title = "ROC Curve")
+```
+
+#### Model interpretation and visualisation
+
+The variables with a coefficient significantly different from zero are 'area', 'avg_age' and 'population3'. For each extra squared kilomter in 'area', and each year increase in 'avg_age' the odds of score_transport =1, that is the census area has enough transport sales points, is multiplied by 1.0134 and 1.1580 respectively and thus increase the odds of score_transport =1. In other words, 'avg_age' seems to have a rather strong positive effect on the number of transport sales points. However, for each percentage increase in 'pcg_num_transaction_city', the odds of score_transport =1 is multiplied by 0.8856 and thus decreases the odds of score_transport =1.
+
+The two plots below show the three significant variables: 'area', 'avg_age' and 'pcg_num_transaction_city'. The binomial relationships between the probabilities of having enough transport sales points and the distribution of 'area' and 'pcg_num_transaction_city' respectively and show that the values of both independent variables are highly similar for score_transport is 1 or 0 explaining the minimal effect on the outcome variable. However, values of 'avg_age' seem to be somewhat different for score_transport is 1 or 0 explaining the effect on the outcome variable.
+
+```{r}
+
+logistic_fit <- glm(score_transport ~., data =df_transport_feature_log , family = binomial)
+summary(logistic_fit)
+
+# Extracting coefficients using summary()
+coef_summary <- coef(summary(logistic_fit))
+
+options(scipen = 999)
+# Exponentiating coefficients
+exp_coefficients <- round(exp(coef_summary[, "Estimate"]), 5)
+exp_coefficients
+options(scipen = 0)
+
+```
+
+```{r}
+df_transport_feature_log|> 
+  ggplot(aes(area, score_transport)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model", 
+    x = "Area",
+    y = "Probability of having enough transport sales points"
+    )
+
+df_transport_feature_log|> 
+  ggplot(aes(avg_age, score_transport)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model", 
+    x = "Average age",
+    y = "Probability of having enough transport sales points"
+    )
+
+
+df_transport_feature_log|> 
+  ggplot(aes(pcg_num_transaction_city, score_transport)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(
+    title = "Logistic Regression Model", 
+    x = "pcg_num_transaction_city",
+    y = "Probability of having enough transport sales points"
+    )
+```
+
+## Discussion
+
+For all three outcome variables: n_pharmacies, n_schools and n_transport_salepoints models were computed to indicate what factors are related to having sufficient or too few of these facilities. For all models, rather few and low impacting coefficients were found. Also, the coefficients were often difficult to interpret due to the highly differing scales of the independent and the dependent variables. It is recommended to do similar analysis with scaled data sets. Moreover, a larger data set with more diverging variables could enhance explainability of the models which are rather low in this report.
